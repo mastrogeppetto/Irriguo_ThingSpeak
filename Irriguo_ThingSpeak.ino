@@ -30,7 +30,7 @@ FishinoClient client;
 // Digital output
 int led = 8;
 int motor = 9;
-int soilEnable = 6;
+int sensorEnable = 6;
 // Digital input
 int tank = 0;
 // Analog input
@@ -41,14 +41,17 @@ int NTC = A5;
 unsigned long int ontime = 10; // irrigation length (seconds)
 unsigned long int lastCycle = 0;
 int FR_threshold = 300; // night detection threshold
-int Soil_threshold =500; // soil dry detection
+int Soil_threshold = 500; // soil dry detection
+// state during last sense cycle
+boolean is_dark; // true if light below threshold
+boolean is_dry;  // true if soil dryness above threshold
  
 // the setup routine runs once when you press reset:
 void setup() {                
   // initialize the digital pin as an output.
   pinMode(led, OUTPUT);
   pinMode(motor, OUTPUT);
-  pinMode(soilEnable, OUTPUT);
+  pinMode(sensorEnable, OUTPUT);
   Serial.begin(115200);
   // === WIFI SETUP ===
   // Initialize SPI for Wifi use
@@ -97,20 +100,12 @@ int read_soil() {
   int i;
   int sum=0;
   // YL power supply only when used (electrolysis)
-  digitalWrite(soilEnable, HIGH);
   delay(500);
   for ( i=0; i<5; i++ ) {
     sum = analogRead(Soil) + sum;
     delay(100);
   }
-  digitalWrite(soilEnable, LOW);
   return sum/5;
-}
-
-
-// TRUE if dark
-boolean is_dark() {
-  return read_light() > FR_threshold;
 }
 
 // Delay for given time (in secs) flashing or not the LED
@@ -157,16 +152,26 @@ void IrrigationCycle(int durata) {
 
 void report()
 {
+  // Reading sensors
   Serial.print("Report: ");
-  String l=String(-(read_light()-FR_threshold),DEC);
-  String t=String(read_temp(),2);
-  String s=String(read_soil(),DEC);
-  String d=String(lapse(lastCycle)/(60.0*60.0),2);
-  String report="&field1="+l+"&field2="+t+"&field3="+d+"&field4="+s;
+  digitalWrite(sensorEnable, HIGH);
+  int l=-(read_light()-FR_threshold);
+  float t=read_temp();
+  int s=read_soil();
+  digitalWrite(sensorEnable, LOW);
+  // Produce report
+  String report="&field1="+String(l,DEC)+ \
+                "&field2="+String(t,2)+ \
+                "&field3="+String(lapse(lastCycle)/(60.0*60.0),2)+   \
+                "&field4="+String(s,DEC)+
+                "&field5="+"0";
   Serial.println(report);
   // safe reset of Wifi module
   client.stop();
-  // Connect with ThingSpeak server
+  // Set system state variables
+  is_dark = ( l < 0 );
+  is_dry = ( s > Soil_threshold );
+  // Connect with ThingSpeak server and send report
   if (client.connect("api.thingspeak.com",80))
   {
     client.println("GET http://api.thingspeak.com/update?api_key="+String(API_KEY)+report);
@@ -185,7 +190,7 @@ void loop() {
   report();
   Serial.println(lapse(lastCycle));
   if ( (lapse(lastCycle) > hours(23)) || (lastCycle == 0) ) {
-    if ( is_dark() ) { 
+    if ( is_dark ) { 
       IrrigationCycle(ontime);
     }
   }
