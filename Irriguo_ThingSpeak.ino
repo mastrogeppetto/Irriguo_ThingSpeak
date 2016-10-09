@@ -22,34 +22,39 @@
 #include <Fishino.h>
 #include <SPI.h>
 #include "secret.h"
+#include "math.h"
 
 // Initialize the Fishino client library
 FishinoClient client;
 
 // PIN assigments
 // Digital output
-int led = 8;
+int led=0;
 int motor = 9;
 int sensorEnable = 6;
 // Digital input
-int tank = 0;
+int tank = 8;
 // Analog input
 int Soil = A3;
 int FR = A4;
 int NTC = A5;
 // constants
-unsigned long int ontime = 10; // irrigation length (seconds)
-unsigned long int lastCycle = 0;
+unsigned long int ontime_min = 10; // irrigation length (seconds)
+unsigned long int ontime_max= 30; // irrigation length (seconds)
+unsigned long int ontime = 20; // irrigation length (seconds)
 int FR_threshold = 300; // night detection threshold
 int Soil_threshold = 500; // soil dry detection
 // state during last sense cycle
 boolean is_dark; // true if light below threshold
 boolean is_dry;  // true if soil dryness above threshold
+// timing
+unsigned long int lastCycle = 0;
+unsigned long int lastWakeUp = 0;
  
 // the setup routine runs once when you press reset:
 void setup() {                
   // initialize the digital pin as an output.
-  pinMode(led, OUTPUT);
+  pinMode(tank, INPUT);
   pinMode(motor, OUTPUT);
   pinMode(sensorEnable, OUTPUT);
   Serial.begin(115200);
@@ -86,14 +91,21 @@ int read_light() {
   return sum/5;
 }
 
+float levelToDegrees(float level) {
+        float r = 22000;
+        float a = -19.39;
+        float b = 201.38+4.9;
+        return a*log(r/((1024.0/level)-1))+b;
+}
+
 float read_temp() {
   int i;
-  int sum=0;
+  float sum=0;
   for ( i=0; i<5; i++ ) {
     sum = analogRead(NTC) + sum;
     delay(100);
   }
-  return ((0.00488 * (sum/5))*(-16.9))+56.7;
+  return levelToDegrees(sum/5);
 }
 
 int read_soil() {
@@ -106,6 +118,10 @@ int read_soil() {
     delay(100);
   }
   return sum/5;
+}
+
+int read_tank() {
+  return digitalRead(tank);
 }
 
 // Delay for given time (in secs) flashing or not the LED
@@ -158,13 +174,15 @@ void report()
   int l=-(read_light()-FR_threshold);
   float t=read_temp();
   int s=read_soil();
+  int w=read_tank();
   digitalWrite(sensorEnable, LOW);
   // Produce report
   String report="&field1="+String(l,DEC)+ \
                 "&field2="+String(t,2)+ \
                 "&field3="+String(lapse(lastCycle)/(60.0*60.0),2)+   \
                 "&field4="+String(s,DEC)+
-                "&field5="+"0";
+                "&field5="+String(w,DEC)+
+                "&field6="+String(ontime,DEC);
   Serial.println(report);
   // safe reset of Wifi module
   client.stop();
@@ -189,9 +207,15 @@ void loop() {
   Serial.println("New loop");
   report();
   Serial.println(lapse(lastCycle));
-  if ( (lapse(lastCycle) > hours(23)) || (lastCycle == 0) ) {
-    if ( is_dark ) { 
-      IrrigationCycle(ontime);
+  if ( (lapse(lastWakeUp) > hours(23)) || (lastWakeUp == 0) ) {
+    if ( is_dark ) {
+      lastWakeUp=millis();
+      if ( is_dry ) {
+        IrrigationCycle(ontime);
+        if ( ontime < ontime_max ) ontime=ontime+1;
+      } else {
+        if ( ontime > ontime_min ) ontime=ontime-1;
+      }
     }
   }
   delay(minutes(15),true);
