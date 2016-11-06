@@ -1,10 +1,12 @@
  /*
-  Analog output of YL soil humidity sensor on pin A3. Power with 5V from arduino.
-  YL power supply (5V) on pin A6 (only when sensing)
-  Photoresistor between a4 (27) and gnd, 100Kohm resistor between a4 and 5V pin.
-  NTC 10K between A5 (28) and gnd, 18Kohm resistor between a5 and 5 V pin.
-  Relay control on pin D9 (13)
-  Control LED on pin D8 (12) 
+  Sensor board.
+   Power from D6 pin (red) only when sensing.
+   Photoresistor between A4 (27, orange) and gnd, 100Kohm resistor between a4 and 5V pin.
+   NTC 10K between A5 (28, yellow) and gnd, 18Kohm resistor between a5 and 5 V pin.
+   Analog output of YL soil humidity sensor on pin A3 (green).
+   Tank empty sensor D5 (blue).
+  Relay board
+   Relay control on pin D8 (13)
   Pin D12 (16) non usable (MISO)
   Pin D7 not usable (?)
   When a4 above threshold value (e.g. 700), detect night darkness.
@@ -21,23 +23,17 @@
 #include <FishinoSockBuf.h>
 #include <Fishino.h>
 #include <SPI.h>
+#include <sensorBoard.h>
+#include <myRelais.h>
+#include <math.h>
 #include "secret.h"
-#include "math.h"
 
 // Initialize the Fishino client library
 FishinoClient client;
-
-// PIN assigments
+sensorBoard sensor;
+myRelais relais;
 // Digital output
-int led=0;
-int motor = 9;
-int sensorEnable = 6;
-// Digital input
-int tank = 8;
-// Analog input
-int Soil = A3;
-int FR = A4;
-int NTC = A5;
+int led = 0;
 // constants
 unsigned long int ontime_min = 10; // irrigation length (seconds)
 unsigned long int ontime_max= 30; // irrigation length (seconds)
@@ -52,11 +48,7 @@ unsigned long int lastCycle = 0;
 unsigned long int lastWakeUp = 0;
  
 // the setup routine runs once when you press reset:
-void setup() {                
-  // initialize the digital pin as an output.
-  pinMode(tank, INPUT);
-  pinMode(motor, OUTPUT);
-  pinMode(sensorEnable, OUTPUT);
+void setup() {
   Serial.begin(115200);
   // === WIFI SETUP ===
   // Initialize SPI for Wifi use
@@ -79,49 +71,6 @@ void setup() {
   }
   Serial.println(Fishino.localIP());
   // === END WIFI SETUP ===
-}
-
-int read_light() {
-  int i;
-  int sum=0;
-  for ( i=0; i<5; i++ ) {
-    sum = analogRead(FR) + sum;
-    delay(100);
-  }
-  return sum/5;
-}
-
-float levelToDegrees(float level) {
-        float r = 22000;
-        float a = -19.39;
-        float b = 201.38+4.9;
-        return a*log(r/((1024.0/level)-1))+b;
-}
-
-float read_temp() {
-  int i;
-  float sum=0;
-  for ( i=0; i<5; i++ ) {
-    sum = analogRead(NTC) + sum;
-    delay(100);
-  }
-  return levelToDegrees(sum/5);
-}
-
-int read_soil() {
-  int i;
-  int sum=0;
-  // YL power supply only when used (electrolysis)
-  delay(500);
-  for ( i=0; i<5; i++ ) {
-    sum = analogRead(Soil) + sum;
-    delay(100);
-  }
-  return sum/5;
-}
-
-int read_tank() {
-  return digitalRead(tank);
 }
 
 // Delay for given time (in secs) flashing or not the LED
@@ -154,28 +103,18 @@ unsigned long int hours(unsigned long int s) { return s*60*60; }
 unsigned long int days(unsigned long int s) { return s*24*60*60; }
 
 
-// Duration in seconds
-void IrrigationCycle(int durata) {
-  digitalWrite(led, HIGH);  // turn the LED on (HIGH is the voltage level)
-  digitalWrite(motor, HIGH);  // turn the MOTOR on (HIGH is the voltage level)
-  Serial.println("Motore acceso");
-  delay(seconds(durata), false);
-  digitalWrite(led, LOW);    // turn the LED off by making the voltage LOW
-  digitalWrite(motor, LOW);  // turn the MOTOR off
-  Serial.println("Motore spento"); 
-  lastCycle=millis();
-}
+
 
 void report()
 {
   // Reading sensors
   Serial.print("Report: ");
-  digitalWrite(sensorEnable, HIGH);
-  int l=-(read_light()-FR_threshold);
-  float t=read_temp();
-  int s=read_soil();
-  int w=read_tank();
-  digitalWrite(sensorEnable, LOW);
+  sensor.on();
+  int l=-(sensor.read_light()-FR_threshold);
+  float t=sensor.read_temp();
+  int s=sensor.read_soil();
+  int w=sensor.read_tank();
+  sensor.off();
   // Produce report
   String report="&field1="+String(l,DEC)+ \
                 "&field2="+String(t,2)+ \
@@ -202,6 +141,71 @@ void report()
   }
 }
 
+int readCommand(char* buffer) {
+  char* ptr=buffer;
+  int linelength=0;
+  boolean startline=true;
+  boolean body=false;
+  char correct_startline[]="HTTP/1.1 200 OK";
+  // TCP connection
+  Serial.println("connecting...");
+  if (client.connect("api.thingspeak.com", 80)) {
+    Serial.println("connected");
+    // Make a HTTP GET request:
+    client.println("GET https://api.thingspeak.com/talkbacks/10449/commands/execute?api_key="+String(API_KEY)+" HTTP/1.1");
+//    client.println("Host: 184.106.153.149");
+    client.println("Connection: close");
+    client.println();
+  } else {
+    // if you didn't get a connection to the server:
+    Serial.println("connection failed");
+    return 0;
+  }
+  // Wait response
+  long int starttime=millis();
+  while ( millis()-starttime < 10000 ) {
+  // if there are incoming bytes available
+  // from the server, read them and print them:
+    if (client.available()) {
+      *ptr = client.read();
+      if ( *ptr == '\n' ) {
+        // Process a new line
+        Serial.print(".");
+        if ( startline ) {
+          *ptr='\0';
+          int i=0;
+          while ( buffer[i] != '\0' ) {
+            if ( atoi(buffer[i]) != atoi(correct_startline[i]) ) {
+              Serial.println("Negative response");
+              return 0;
+            }
+            i++;
+          }
+          Serial.println("Response OK");
+          startline=false;
+        }
+        ptr=buffer;
+        linelength=0;
+      } else {
+        ptr++;
+        linelength++;
+      }
+// in the buffer the command
+    }
+  // if the server's disconnected, stop the client:
+    if (!client.connected()) {
+      *ptr='\0';
+      Serial.print("\n -->");
+      Serial.println(buffer);
+      Serial.println("disconnecting.");
+      client.stop();
+      return 1;
+    }
+  }
+  // Timeout
+  Serial.println("Timeout");
+  return 0;
+}
 
 void loop() {
   Serial.println("New loop");
@@ -211,7 +215,8 @@ void loop() {
     if ( is_dark ) {
       lastWakeUp=millis();
       if ( is_dry ) {
-        IrrigationCycle(ontime);
+        relais.irrigationCycle(ontime); 
+        lastCycle=millis();
         if ( ontime < ontime_max ) ontime=ontime+1;
       } else {
         if ( ontime > ontime_min ) ontime=ontime-1;
